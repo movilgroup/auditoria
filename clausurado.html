@@ -211,32 +211,33 @@
          class="form-control mb-2"
          readonly>
 
-  <label>Caminante</label>
+  <label for="caminanteSelect">Caminante</label>
 
   <select id="caminanteSelect"
-          class="form-select mb-2">
+          class="form-select mb-2" disabled>
 
     <option value="">Seleccione caminante</option>
 
   </select>
 
-  <label>Zona</label>
+  <label for="zonaSelect">Zona</label>
 
   <select id="zonaSelect"
-          class="form-select mb-2">
+          class="form-select mb-2" disabled>
 
-    <option value="">Seleccione zona</option>
+    <option value="">Todas las zonas</option>
 
   </select>
 
-  <label>Código PSR - Nombre PSR</label>
+  <label for="psrSelect">Código PSR - Nombre PSR</label>
 
   <select id="psrSelect"
-          class="form-select mb-2">
+          class="form-select mb-2" disabled>
 
     <option value="">Seleccione PSR</option>
 
   </select>
+<p id="estadoPSR" class="small mt-2" role="status" aria-live="polite">Cargando caminantes y PSR...</p>
 
   <label>Observaciones</label>
 
@@ -431,181 +432,105 @@ document.addEventListener("hidden.bs.modal", () => {
 
 });
 
-/* ================= BUSCADOR ================= */
-
+const caminanteSelect = document.getElementById("caminanteSelect");
+const zonaSelect = document.getElementById("zonaSelect");
+const psrSelect = document.getElementById("psrSelect");
 let tomPSR = null;
+let datosPSR = [];
+let psrDelCaminante = [];
+const estadoPSR = document.getElementById("estadoPSR");
 
-/* ================= CAMINANTES ================= */
+function pintarSelect(s){
+  s.classList.toggle("has-value", s.value!=="");
+}
 
-mostrarLoader();
-
-fetch(API_CAMINANTES)
-
-.then(r => r.json())
-
-.then(data => {
-
-  const select =
-  document.getElementById("caminanteSelect");
-
-  (data[supervisor] || []).forEach(c => {
-
-    const opt =
-    document.createElement("option");
-
-    opt.value = c;
-    opt.textContent = c;
-
-    select.appendChild(opt);
-
-  });
-
-})
-
-.catch(() => {
-
-  mostrarError("No se pudieron cargar caminantes");
-
-})
-
-.finally(() => {
-
-  ocultarLoader();
-
+document.querySelectorAll("select").forEach(s=>{
+  s.addEventListener("change", ()=>pintarSelect(s));
 });
 
-/* ================= CAMINANTE -> ZONAS ================= */
+function normalizarNombre(valor){
+  return String(valor || "").normalize("NFD").replace(/[\u0300-\u036f]/g, "").trim().toLowerCase();
+}
 
-document.getElementById("caminanteSelect")
-.addEventListener("change", function () {
+function textoPSR(psr){
+  return `${psr["Codigo PSR"]} - ${psr["Nombre PSR"]}`;
+}
 
-  actualizarVisual("caminanteSelect");
+function actualizarZona(){
+  const seleccionado = psrDelCaminante.find(p => String(p["Codigo PSR"]).trim() === psrSelect.value);
+  if(seleccionado) zonaSelect.value = seleccionado.Zona || "";
+  pintarSelect(zonaSelect);
 
-  fetch(JSON_PSR)
+}
 
-  .then(r => r.json())
+psrSelect.onchange = actualizarZona;
 
-  .then(data => {
+function cargarOpcionesPSR(zona = ""){
+  tomPSR.clear();
+  tomPSR.clearOptions();
+  tomPSR.setTextboxValue("");
+  const disponibles = psrDelCaminante.filter(p => !zona || p.Zona === zona);
+  tomPSR.addOptions(disponibles.map(p => ({value: String(p["Codigo PSR"]).trim(), text: textoPSR(p)})));
+  if(disponibles.length){
+    tomPSR.enable();
+    estadoPSR.textContent = `${disponibles.length} PSR disponibles. Busque por código o nombre, o filtre por zona.`;
+  } else {
+    tomPSR.disable();
+    estadoPSR.textContent = caminanteSelect.value
+      ? "No hay PSR registrados para este caminante."
+      : "Seleccione un caminante para buscar PSR.";
+  }
+  actualizarZona();
+  pintarSelect(psrSelect);
+}
 
-    const caminante =
-    this.value.trim().toLowerCase();
+caminanteSelect.onchange = function(){
+  psrDelCaminante = this.value
+    ? datosPSR.filter(p => normalizarNombre(p.Caminante) === normalizarNombre(this.value))
+    : [];
+  zonaSelect.replaceChildren(new Option("Todas las zonas", ""));
+  [...new Set(psrDelCaminante.map(p => p.Zona).filter(Boolean))]
+    .sort((a, b) => a.localeCompare(b, "es"))
+    .forEach(zona => zonaSelect.add(new Option(zona, zona)));
+  zonaSelect.disabled = psrDelCaminante.length === 0;
+  cargarOpcionesPSR();
+};
 
-    const zonas = data
+zonaSelect.onchange = function(){
+  cargarOpcionesPSR(this.value);
+};
 
-    .filter(i =>
-
-      String(i.Caminante)
-      .trim()
-      .toLowerCase() === caminante
-
-    )
-
-    .map(i =>
-
-      String(i.Zona).trim()
-
-    );
-
-    const zonaSelect =
-    document.getElementById("zonaSelect");
-
-    zonaSelect.innerHTML =
-    '<option value="">Seleccione zona</option>';
-
-    [...new Set(zonas)].forEach(z => {
-
-      const opt =
-      document.createElement("option");
-
-      opt.value = z;
-      opt.textContent = z;
-
-      zonaSelect.appendChild(opt);
-
+async function cargarDatosClausurados(){
+  mostrarLoader();
+  try {
+    tomPSR = new TomSelect("#psrSelect", {
+      create: false,
+      sortField: {field: "text", direction: "asc"},
+      placeholder: "Buscar por código o nombre de PSR...",
+      maxOptions: 500
     });
+    const [caminantes, psr] = await Promise.all([API_CAMINANTES, JSON_PSR].map(async url => {
+      const respuesta = await fetch(url);
+      if(!respuesta.ok) throw new Error(`No se pudo cargar ${url}`);
+      return respuesta.json();
+    }));
+    if(!Array.isArray(psr)) throw new Error("El listado de PSR no es válido");
+    datosPSR = psr;
+    const lista = caminantes[supervisor] || [];
+    lista.forEach(c => caminanteSelect.add(new Option(c, c)));
+    caminanteSelect.disabled = lista.length === 0;
+    estadoPSR.textContent = lista.length
+      ? "Seleccione un caminante para buscar PSR."
+      : "No hay caminantes registrados para este supervisor.";
+  } catch(err) {
+    console.error("Error cargando datos de auditoría:", err);
+    estadoPSR.textContent = "No se pudieron cargar los caminantes o PSR. Recargue la página para reintentar.";
+  } finally {
+    ocultarLoader();
+  }
+}
 
-  });
-
-});
-
-/* ================= ZONA -> PSR ================= */
-
-document.getElementById("zonaSelect")
-.addEventListener("change", function () {
-
-  actualizarVisual("zonaSelect");
-
-  fetch(JSON_PSR)
-
-  .then(r => r.json())
-
-  .then(data => {
-
-    const zona =
-    this.value.trim().toLowerCase();
-
-    const psrList = data.filter(i =>
-
-      String(i.Zona)
-      .trim()
-      .toLowerCase() === zona
-
-    );
-
-    const psrSelect =
-    document.getElementById("psrSelect");
-
-    psrSelect.innerHTML =
-    '<option value="">Seleccione PSR</option>';
-
-    psrList.forEach(p => {
-
-      const codigo =
-      String(p["Codigo PSR"]).trim();
-
-      const nombre =
-      String(p["Nombre PSR"]).trim();
-
-      const opt =
-      document.createElement("option");
-
-      opt.value = codigo;
-
-      opt.textContent =
-      codigo + " - " + nombre;
-
-      psrSelect.appendChild(opt);
-
-    });
-
-    /* 🔎 REINICIAR BUSCADOR */
-
-    if(tomPSR){
-      tomPSR.destroy();
-    }
-
-    tomPSR = new TomSelect("#psrSelect",{
-      create:false,
-      placeholder:"Buscar PSR...",
-      maxOptions:500,
-      sortField:{
-        field:"text",
-        direction:"asc"
-      }
-    });
-
-  });
-
-});
-
-/* ================= PSR ================= */
-
-document.getElementById("psrSelect")
-.addEventListener("change", function () {
-
-  actualizarVisual("psrSelect");
-
-});
+cargarDatosClausurados();
 
 /* ================= ERROR ================= */
 
@@ -756,49 +681,11 @@ async function enviarAuditoria() {
 /* ================= LIMPIAR ================= */
 
 function limpiarFormulario() {
-
-  ["caminanteSelect",
-   "zonaSelect"]
-
-  .forEach(id => {
-
-    const el =
-    document.getElementById(id);
-
-    el.value = "";
-
-    el.classList.remove("has-value");
-
-  });
-
-  /* ===== LIMPIAR PSR ===== */
-
-  const psr =
-  document.getElementById("psrSelect");
-
-  psr.innerHTML =
-  '<option value="">Seleccione PSR</option>';
-
-  psr.classList.remove("has-value");
-
-  if (tomPSR) {
-
-    tomPSR.clear();
-    tomPSR.clearOptions();
-    tomPSR.destroy();
-
-    tomPSR = null;
-
-  }
-
-  /* ===== LIMPIAR TEXTO ===== */
-
-  document.getElementById("observaciones")
-  .value = "";
-
-  document.getElementById("fotos")
-  .value = "";
-
+  caminanteSelect.value = "";
+  pintarSelect(caminanteSelect);
+  caminanteSelect.onchange();
+  document.getElementById("observaciones").value = "";
+  document.getElementById("fotos").value = "";
 }
 /* ================= MENU ================= */
 

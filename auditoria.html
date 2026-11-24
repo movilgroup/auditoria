@@ -223,24 +223,25 @@ input, select, textarea, button {
 
 <div class="row-flex">
   <div class="col-flex">
-    <label>Caminante</label>
-    <select id="caminanteSelect" class="form-select">
+    <label for="caminanteSelect">Caminante</label>
+    <select id="caminanteSelect" class="form-select" disabled>
       <option value="">Seleccione</option>
     </select>
   </div>
 
   <div class="col-flex">
-    <label>Zona</label>
-    <select id="zonaSelect" class="form-select">
-      <option value="">Seleccione</option>
+    <label for="zonaSelect">Zona</label>
+    <select id="zonaSelect" class="form-select" disabled>
+      <option value="">Todas las zonas</option>
     </select>
   </div>
 </div>
 
-<label>PSR</label>
-<select id="psrSelect" class="form-select mb-2">
+<label for="psrSelect">PSR</label>
+<select id="psrSelect" class="form-select mb-2" disabled>
   <option value="">Seleccione PSR</option>
 </select>
+<p id="estadoPSR" class="small mt-2" role="status" aria-live="polite">Cargando caminantes y PSR...</p>
 
 <div id="bloque1" class="row-flex">
   <div class="col-flex">
@@ -432,89 +433,101 @@ const bloqueMulti = document.getElementById("bloqueMulti");
 const bloqueRecargas = document.getElementById("bloqueRecargas");
 
 let tomPSR = null;
+let datosPSR = [];
+let psrDelCaminante = [];
+const estadoPSR = document.getElementById("estadoPSR");
 
 function pintarSelect(s){
   s.classList.toggle("selected-red", s.value!=="");
 }
 
-showLoader();
-
-fetch(API_CAMINANTES)
-.then(r => r.json())
-.then(data => {
-
-  caminanteSelect.innerHTML = `<option value="">Seleccione</option>`;
-
-  if (data[supervisor]) {
-    data[supervisor].forEach(c => {
-      caminanteSelect.innerHTML += `<option>${c}</option>`;
-    });
-  }
-
-})
-.catch(err => {
-  console.error("Error cargando caminantes:", err);
-})
-.finally(() => {
-  hideLoader();
-});
-
 document.querySelectorAll("select").forEach(s=>{
   s.addEventListener("change", ()=>pintarSelect(s));
 });
 
-caminanteSelect.onchange = function(){
-  fetch(JSON_PSR).then(r=>r.json()).then(data=>{
-    zonaSelect.innerHTML='<option value="">Seleccione</option>';
+function normalizarNombre(valor){
+  return String(valor || "").normalize("NFD").replace(/[\u0300-\u036f]/g, "").trim().toLowerCase();
+}
 
-    [...new Set(
-      data
-      .filter(i=>i.Caminante===this.value)
-      .map(i=>i.Zona)
-    )]
-    .forEach(z=>zonaSelect.innerHTML+=`<option>${z}</option>`);
-  });
+function textoPSR(psr){
+  return `${psr["Codigo PSR"]} - ${psr["Nombre PSR"]}`;
+}
+
+function actualizarZona(){
+  const seleccionado = psrDelCaminante.find(p => textoPSR(p) === psrSelect.value);
+  if(seleccionado) zonaSelect.value = seleccionado.Zona || "";
+  pintarSelect(zonaSelect);
+  bloque1.style.display = seleccionado ? "flex" : "none";
+}
+
+psrSelect.onchange = actualizarZona;
+
+function cargarOpcionesPSR(zona = ""){
+  tomPSR.clear();
+  tomPSR.clearOptions();
+  tomPSR.setTextboxValue("");
+  const disponibles = psrDelCaminante.filter(p => !zona || p.Zona === zona);
+  tomPSR.addOptions(disponibles.map(p => ({value: textoPSR(p), text: textoPSR(p)})));
+  if(disponibles.length){
+    tomPSR.enable();
+    estadoPSR.textContent = `${disponibles.length} PSR disponibles. Busque por código o nombre, o filtre por zona.`;
+  } else {
+    tomPSR.disable();
+    estadoPSR.textContent = caminanteSelect.value
+      ? "No hay PSR registrados para este caminante."
+      : "Seleccione un caminante para buscar PSR.";
+  }
+  actualizarZona();
+  pintarSelect(psrSelect);
+}
+
+caminanteSelect.onchange = function(){
+  psrDelCaminante = this.value
+    ? datosPSR.filter(p => normalizarNombre(p.Caminante) === normalizarNombre(this.value))
+    : [];
+  zonaSelect.replaceChildren(new Option("Todas las zonas", ""));
+  [...new Set(psrDelCaminante.map(p => p.Zona).filter(Boolean))]
+    .sort((a, b) => a.localeCompare(b, "es"))
+    .forEach(zona => zonaSelect.add(new Option(zona, zona)));
+  zonaSelect.disabled = psrDelCaminante.length === 0;
+  cargarOpcionesPSR();
 };
 
 zonaSelect.onchange = function(){
-
-  fetch(JSON_PSR)
-  .then(r=>r.json())
-  .then(data=>{
-
-    psrSelect.innerHTML='<option value="">Seleccione PSR</option>';
-
-    data
-    .filter(i=>i.Zona===this.value)
-    .forEach(p=>{
-      psrSelect.innerHTML+=`
-        <option>
-          ${p["Codigo PSR"]} - ${p["Nombre PSR"]}
-        </option>
-      `;
-    });
-
-    // 🔎 DESTRUIR BUSCADOR ANTERIOR
-    if(tomPSR){
-      tomPSR.destroy();
-    }
-
-    // 🔎 CREAR BUSCADOR
-    tomPSR = new TomSelect("#psrSelect",{
-      create:false,
-      sortField:{
-        field:"text",
-        direction:"asc"
-      },
-      placeholder:"Buscar PSR...",
-      maxOptions:500
-    });
-
-  });
-
+  cargarOpcionesPSR(this.value);
 };
 
-psrSelect.onchange = ()=>bloque1.style.display="flex";
+async function cargarDatosAuditoria(){
+  showLoader();
+  try {
+    tomPSR = new TomSelect("#psrSelect", {
+      create: false,
+      sortField: {field: "text", direction: "asc"},
+      placeholder: "Buscar por código o nombre de PSR...",
+      maxOptions: 500
+    });
+    const [caminantes, psr] = await Promise.all([API_CAMINANTES, JSON_PSR].map(async url => {
+      const respuesta = await fetch(url);
+      if(!respuesta.ok) throw new Error(`No se pudo cargar ${url}`);
+      return respuesta.json();
+    }));
+    if(!Array.isArray(psr)) throw new Error("El listado de PSR no es válido");
+    datosPSR = psr;
+    const lista = caminantes[supervisor] || [];
+    lista.forEach(c => caminanteSelect.add(new Option(c, c)));
+    caminanteSelect.disabled = lista.length === 0;
+    estadoPSR.textContent = lista.length
+      ? "Seleccione un caminante para buscar PSR."
+      : "No hay caminantes registrados para este supervisor.";
+  } catch(err) {
+    console.error("Error cargando datos de auditoría:", err);
+    estadoPSR.textContent = "No se pudieron cargar los caminantes o PSR. Recargue la página para reintentar.";
+  } finally {
+    hideLoader();
+  }
+}
+
+cargarDatosAuditoria();
 
 materialPOP.onchange = stockLotes.onchange = ()=>{
   if(materialPOP.value && stockLotes.value) bloque2.style.display="flex";
